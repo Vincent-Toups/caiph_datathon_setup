@@ -1,3 +1,32 @@
+This is a terraform setup I built with the assistance of codex which
+deploys a configurable number of EC2 instances which run a podman
+container pulled from s3.
+
+Each instance runs the container twice: jupyter lab and opencode's web
+interface.
+
+So this basically works. Missing pieces:
+
+Upload the zip of the datasets to s3, pull the datasets down to the
+containers and put them someplace. How should we handle files?
+Presently we don't mount any volumes in the container.
+
+Nice to have: I have bought caiph_datahon.live and it would be nice to
+point sub-domains to the instances, eg:
+
+opencode_red.caiph_datathon.live 
+jupyter_red.caiph_datathon.live 
+
+etc
+
+Teams are color coded.
+
+
+
+
+AI Slop:
+========
+
 # AWS Infrastructure-as-Code: EC2 + Podman + Caddy with HTTPS (Namecheap DNS)
 
 This Terraform module deploys a fleet of Ubuntu EC2 instances, builds and
