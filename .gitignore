@@ -1,0 +1,25 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Generated / local config
+auto.generated.tfvars
+namecheap_dns_*.txt
+
+# Secrets / keys
+env.txt
+*.pem
+sshkey
+
+# Debug output
+debug/
+
+# Large artifacts
+container-image.tgz
+container-image.tgz.sha256
+
+# Data/archives
+*.zip
+*.tgz
+*.csv
