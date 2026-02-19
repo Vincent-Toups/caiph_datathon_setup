@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+
+# This script is rendered by Terraform using templatefile().  It installs
+# podman and the AWS CLI, pulls build inputs from S3, builds a container
+# image, runs two containers, generates systemd units so they restart
+# on boot, and finally installs Caddy as a reverse proxy to provide
+# automatic HTTPS with Let’s Encrypt.  The domain for each instance
+# is derived from the instance index (team01, team02, …) and the
+# provided base domain.  Adjust the Caddyfile to suit your routing
+# preferences.
+
+set -euo pipefail
+
+# Structured logging: write to /var/log and to system journal
+LOG_FILE="/var/log/datathon-setup.log"
+mkdir -p /var/log
+log() { echo "[$(date -Is)] $*"; logger -t datathon-setup -- "$*" || true; }
+trap 'log "[ERROR] Setup failed at line $LINENO"' ERR
+exec > >(tee -a "$LOG_FILE") 2>&1
+log "[START] Datathon node bootstrap starting"
+
+export DEBIAN_FRONTEND=noninteractive
+export AWS_REGION="${aws_region}"
+
+##############################
+# Base packages and podman
+##############################
+log "Installing base packages and podman"
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  ca-certificates curl unzip jq \
+  podman uidmap slirp4netns fuse-overlayfs \
+  gnupg apt-transport-https
+
+##############################
+# Rootless podman for ubuntu
+##############################
+log "Configuring rootless podman prerequisites for ubuntu"
+if ! grep -q '^ubuntu:' /etc/subuid; then
+  usermod --add-subuids 100000-165535 ubuntu
+fi
+if ! grep -q '^ubuntu:' /etc/subgid; then
+  usermod --add-subgids 100000-165535 ubuntu
+fi
+
+##############################
+# AWS CLI v2
+##############################
+log "Installing AWS CLI v2"
+tmpdir="$(mktemp -d)"
+cd "$tmpdir"
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip -q awscliv2.zip
+./aws/install
+cd /
+rm -rf "$tmpdir"
+
+##############################
+# Build workspace
+##############################
+workdir="/opt/appbuild"
+mkdir -p "$workdir"
+cd "$workdir"
+
+# Bucket convention from Terraform locals
+BUILDCTX_BUCKET="${buildctx_bucket}"
+IMAGE_TAR_KEY="${image_tar_key}"
+
+# Derive bucket if empty (defensive)
+if [[ -z "$BUILDCTX_BUCKET" ]]; then
+  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+  BUILDCTX_BUCKET="podman-build-context-$${ACCOUNT_ID}-$${AWS_REGION}"
+fi
+
+# Pull runtime env.txt from S3
+log "Fetching runtime env: s3://$${BUILDCTX_BUCKET}/${env_key}"
+aws s3 cp "s3://$${BUILDCTX_BUCKET}/${env_key}" "$workdir/env.txt"
+
+# Download prebuilt container image tar and load into podman
+log "Downloading prebuilt image: s3://$${BUILDCTX_BUCKET}/$${IMAGE_TAR_KEY}"
+LOCAL_IMAGE_PATH="$workdir/$${IMAGE_TAR_KEY##*/}"
+aws s3 cp "s3://$${BUILDCTX_BUCKET}/$${IMAGE_TAR_KEY}" "$LOCAL_IMAGE_PATH"
+
+# podman load expects an archive format it can parse directly.
+# If the object is gzip-compressed, unpack to a temporary tar first.
+LOAD_IMAGE_PATH="$LOCAL_IMAGE_PATH"
+if [[ "$LOCAL_IMAGE_PATH" == *.gz || "$LOCAL_IMAGE_PATH" == *.tgz ]]; then
+  log "Decompressing image archive before podman load"
+  LOAD_IMAGE_PATH="$workdir/container-image.tar"
+  gzip -dc "$LOCAL_IMAGE_PATH" > "$LOAD_IMAGE_PATH"
+fi
+
+log "Loading image into podman"
+LOAD_OUT=$(podman load -i "$LOAD_IMAGE_PATH")
+echo "$LOAD_OUT"
+# Attempt to parse loaded image ref; then enforce desired tag ${image_name}
+LOADED_REF=$(echo "$LOAD_OUT" | awk '{print $NF}' | tail -n1 || true)
+if [[ -n "$LOADED_REF" ]]; then
+  podman tag "$LOADED_REF" "${image_name}" || true
+fi
+
+# Free disk space as soon as the image is loaded and tagged.
+rm -f "$LOCAL_IMAGE_PATH"
+if [[ "$LOAD_IMAGE_PATH" != "$LOCAL_IMAGE_PATH" ]]; then
+  rm -f "$LOAD_IMAGE_PATH"
+fi
+
+##############################
+# Run application containers
+##############################
+
+# Generate and persist credentials
+log "Writing Jupyter token to $workdir/jupyter_token.txt"
+echo "${jupyter_token}" > "$workdir/jupyter_token.txt"
+chmod 600 "$workdir/jupyter_token.txt"
+echo "[cloud-init] Jupyter token written to $workdir/jupyter_token.txt"
+
+# Prepare run commands (inject Jupyter token if applicable)
+RUN1_CMD='${run1_cmd}'
+if echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])jupyter( |$)"; then
+  if ! echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])--ServerApp.token(=|[[:space:]])"; then
+    RUN1_CMD="$RUN1_CMD --ServerApp.token=${jupyter_token}"
+  fi
+  if ! echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])--allow-root([[:space:]]|$)"; then
+    RUN1_CMD="$RUN1_CMD --allow-root"
+  fi
+fi
+
+# Remove any existing containers with the same names
+log "Removing any previous containers"
+podman rm -f "${run1_name}" >/dev/null 2>&1 || true
+podman rm -f "${run2_name}" >/dev/null 2>&1 || true
+
+# Run the first container.  The command is executed via bash -lc so
+# that shell features (like $PATH, expansions, etc.) work as
+# expected.
+log "Starting container: ${run1_name}"
+podman run -d --name "${run1_name}" \
+  --env-file "$workdir/env.txt" \
+  --restart=always \
+  -p 8888:8888 \
+  "${image_name}" bash -lc "$RUN1_CMD"
+
+# Run the second container
+log "Starting container: ${run2_name}"
+podman run -d --name "${run2_name}" \
+  --env-file "$workdir/env.txt" \
+  --restart=always \
+  -p 3000:3000 \
+  "${image_name}" bash -lc '${run2_cmd}'
+
+# Generate systemd unit files so that podman-managed containers
+# survive reboots.
+log "Generating systemd units for containers"
+mkdir -p /etc/systemd/system
+podman generate systemd --new --name "${run1_name}" > "/etc/systemd/system/${run1_name}.service"
+podman generate systemd --new --name "${run2_name}" > "/etc/systemd/system/${run2_name}.service"
+
+systemctl daemon-reload
+systemctl enable --now "${run1_name}.service" "${run2_name}.service"
+log "Enabled services: ${run1_name}.service, ${run2_name}.service"
+
+if [[ "${enable_caddy}" == "true" ]]; then
+  ##############################
+  # Caddy reverse proxy setup
+  ##############################
+
+  # Install Caddy from its official repository.  Caddy automatically
+  # obtains TLS certificates via Let’s Encrypt.  If your security
+  # group restricts ports 80 and 443 to a limited set of IPs, ensure
+  # that Let’s Encrypt can reach your service or configure Caddy to
+  # use DNS-01 challenges with a supported provider.
+  log "Installing Caddy"
+  cd /
+  mkdir -p /tmp/caddy-install
+  cd /tmp/caddy-install
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -y
+  apt-get install -y caddy
+
+  # Derive the subdomain for this instance.  Instances are numbered
+  # starting from zero by Terraform, so add 1 and left-pad with zeros.
+  team_index=$(printf "%02d" $(( ${instance_index} + 1 )))
+  team_name="team$${team_index}"
+  fqdn="$${team_name}.${domain_name}"
+
+  # Caddy is optional; direct port access is also supported.
+  # Keep this disabled if upstream services cannot run behind a path prefix.
+  log "Writing Caddyfile for $${fqdn}"
+  cat > /etc/caddy/Caddyfile <<EOF
+$${fqdn} {
+  reverse_proxy /jupyter* 127.0.0.1:8888
+  reverse_proxy /opencode* 127.0.0.1:3000
+}
+EOF
+
+  # Enable and start Caddy.  It will automatically request
+  # certificates from Let’s Encrypt and renew them as needed.
+  systemctl enable --now caddy
+  log "Caddy enabled and started"
+else
+  log "Skipping Caddy setup (enable_caddy=false); use direct host ports instead."
+fi
+
+log "[OK] Datathon node bootstrap complete"

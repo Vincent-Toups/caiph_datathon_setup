@@ -1,0 +1,124 @@
+# =============================================================================
+# JupyterLab (RTC + AI) Containerfile — CPU-only
+# - Based on Ubuntu 22.04 (no CUDA/GPU dependencies)
+# - Adds Jupyter Server YDoc (RTC) + Jupyter AI
+# - Adds default providers: OpenAI, Anthropic, Azure OpenAI, Bedrock, Ollama
+# - Uses python3 throughout to avoid PATH/env mismatches
+# =============================================================================
+
+FROM ubuntu:22.04
+
+USER root
+
+# -----------------------------------------------------------------------------
+# Base system + Python
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      locales \
+      build-essential \
+      gfortran \
+      pkg-config \
+      zlib1g-dev \
+      libxt-dev \
+      python3 \
+      python3-pip \
+      python3-venv \
+      r-base \
+      r-base-dev \
+      libcurl4-openssl-dev \
+      libssl-dev \
+      libxml2-dev \
+      libicu-dev \
+      libcairo2-dev \
+      libpango1.0-dev \
+      libfontconfig1-dev \
+      libfreetype6-dev \
+      libpng-dev \
+      libtiff5-dev \
+      libjpeg-dev \
+      libwebp-dev \
+      libbz2-dev \
+      libharfbuzz-dev \
+      libfribidi-dev \
+      fonts-dejavu-core \
+      s3fs \
+      rclone \
+      fuse3 \
+      || apt-get install -y --no-install-recommends ca-certificates curl git locales python3 python3-pip python3-venv s3fs rclone fuse; \
+    rm -rf /var/lib/apt/lists/*; \
+    sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen; \
+    locale-gen
+
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# -----------------------------------------------------------------------------
+# JupyterLab: RTC + AI extensions + providers
+# -----------------------------------------------------------------------------
+RUN python3 -m pip install --no-cache-dir -U pip setuptools wheel \
+ && python3 -m pip install --no-cache-dir \
+      "jupyterlab>=4" \
+      "jupyter-server>=2" \
+      ipywidgets \
+      pyyaml \
+      jupyter_ydoc \
+      jupyter_server_ydoc \
+      jupyter-collaboration \
+      "jupyter-ai[openai,anthropic,azure-openai,bedrock]" \
+      langchain-openai \
+      langchain-aws \
+      langchain-ollama \
+      numpy \
+      pandas \
+      scipy \
+      scikit-learn \
+      matplotlib \
+      seaborn \
+      statsmodels \
+      plotly \
+      polars \
+      pyarrow \
+      fastparquet
+# Fail fast if collaboration/RTC/AI modules are not importable
+RUN python3 -c "import importlib; mods=['jupyter_collaboration','jupyter_ydoc','jupyter_server_ydoc','jupyterlab','jupyter_ai']; [importlib.import_module(m) for m in mods]"
+
+# -----------------------------------------------------------------------------
+# ML stacks (CPU-only: PyTorch + TensorFlow CPU wheels)
+RUN bash -lc 'set -euo pipefail; \
+  python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
+  python3 -m pip install --no-cache-dir --prefer-binary \
+    torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1; \
+  python3 -m pip install --no-cache-dir --prefer-binary tensorflow || true; \
+  python3 -c "import importlib; importlib.import_module(\"torch\"); importlib.import_module(\"torchvision\");"; \
+  python3 -c "import tensorflow as _" || echo "[WARN] TensorFlow import skipped/failed"; \
+  echo "CPU ML deps import OK (torch, torchvision)"'
+
+
+# -----------------------------------------------------------------------------
+# R graphics/text stack first (fail fast if ragg cannot build), then tidyverse
+# -----------------------------------------------------------------------------
+RUN R -q -e "pkgs<-c('systemfonts','textshaping','ragg'); install.packages(pkgs, repos='https://cloud.r-project.org'); missing<-pkgs[!sapply(pkgs, function(p) suppressWarnings(requireNamespace(p, quietly=TRUE)))]; if(length(missing)) stop(paste('R packages failed:', paste(missing, collapse=', ')))"
+RUN R -q -e "pkgs<-c('IRkernel','tidyverse','nhanesA'); install.packages(pkgs, repos='https://cloud.r-project.org'); missing<-pkgs[!sapply(pkgs, function(p) suppressWarnings(requireNamespace(p, quietly=TRUE)))]; if(length(missing)) stop(paste('R packages failed:', paste(missing, collapse=', '))); IRkernel::installspec(user=FALSE)"
+
+# (S3 tools installed above with apt)
+
+# -----------------------------------------------------------------------------
+# No runtime ENV toggles; sensible defaults are baked into the CMD.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Startup: JupyterLab in collaborative mode by default
+#   We run JupyterLab directly as the container's default command.
+#   Host launcher will override as needed.
+# -----------------------------------------------------------------------------
+RUN curl -fsSL https://opencode.ai/install | bash
+
+CMD ["bash", "-lc", "jupyter lab --allow-root --ServerApp.ip=0.0.0.0 --ServerApp.port=8888 --ServerApp.token=datathon --ServerApp.open_browser=False --ServerApp.root_dir=/book --collaborative"]
