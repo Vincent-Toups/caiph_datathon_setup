@@ -53,3 +53,5 @@ tramp
 __pycache__/
 
 .terraform/
+
+.jupyter_ystore.db
