@@ -1,0 +1,50 @@
+###
+# Example config for Jupyter AI and S3 mounts
+# Copy to config.yaml and edit as needed.
+###
+
+jupyter_ai:
+  # One of: openai, anthropic, azure-openai, bedrock, ollama
+  provider: openai
+  # Optional default model name (provider-specific)
+  model: gpt-4o-mini
+
+  # Provider-specific settings (only fill the one you use)
+  openai:
+    api_key: "sk-..."
+    # base_url: "https://api.openai.com/v1"  # Optional, for custom gateways
+
+  anthropic:
+    api_key: "..."
+
+  azure_openai:
+    api_key: "..."
+    endpoint: "https://YOUR-RESOURCE.openai.azure.com/"
+    api_version: "2024-02-15-preview"
+
+  bedrock:
+    region: "us-east-1"
+    # Either rely on instance/profile envs or set keys here
+    # access_key_id: "..."
+    # secret_access_key: "..."
+
+  ollama:
+    host: "http://127.0.0.1:11434"
+
+# Define zero or more S3 mounts; each becomes a directory in the container
+s3_mounts:
+  - name: data
+    bucket: "my-bucket"
+    # Optional prefix inside the bucket
+    # path: "folder/subfolder"
+    # Where to mount inside the container
+    mountpoint: "/book/mnt/data"
+    region: "us-east-1"
+    # For AWS, leave provider empty; for S3-compatible (e.g., MinIO), set:
+    # provider: Minio
+    # endpoint: "https://minio.example.com"
+    # force_path_style: true
+    # Optionally specify dedicated credentials (otherwise rclone uses env/instance profile)
+    # access_key_id: "..."
+    # secret_access_key: "..."
+

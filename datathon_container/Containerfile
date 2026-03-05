@@ -106,7 +106,7 @@ RUN bash -lc 'set -euo pipefail; \
 # R graphics/text stack first (fail fast if ragg cannot build), then tidyverse
 # -----------------------------------------------------------------------------
 RUN R -q -e "pkgs<-c('systemfonts','textshaping','ragg'); install.packages(pkgs, repos='https://cloud.r-project.org'); missing<-pkgs[!sapply(pkgs, function(p) suppressWarnings(requireNamespace(p, quietly=TRUE)))]; if(length(missing)) stop(paste('R packages failed:', paste(missing, collapse=', ')))"
-RUN R -q -e "pkgs<-c('IRkernel','tidyverse','nhanesA'); install.packages(pkgs, repos='https://cloud.r-project.org'); missing<-pkgs[!sapply(pkgs, function(p) suppressWarnings(requireNamespace(p, quietly=TRUE)))]; if(length(missing)) stop(paste('R packages failed:', paste(missing, collapse=', '))); IRkernel::installspec(user=FALSE)"
+RUN R -q -e "pkgs<-c('IRkernel','tidyverse','knitr','factoextra','tidymodels','themis','nhanesA'); install.packages(pkgs, repos='https://cloud.r-project.org'); missing<-pkgs[!sapply(pkgs, function(p) suppressWarnings(requireNamespace(p, quietly=TRUE)))]; if(length(missing)) stop(paste('R packages failed:', paste(missing, collapse=', '))); IRkernel::installspec(user=FALSE)"
 
 # (S3 tools installed above with apt)
 

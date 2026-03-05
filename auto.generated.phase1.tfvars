@@ -1,0 +1,10 @@
+instance_count = 6
+instance_type  = "t3.medium"
+root_volume_size_gb = 64
+create_data_volumes = true
+env_hash = "b939ce4ac03183713c7e28af02dafe59f314e5561c630bb2c1995af4aaf83b77"
+ssh_key_name   = "ws-default-keypair"
+ports = [22,8888,3000,80,443]
+auto_allow_caller_ip = false
+allow_cidrs = ["0.0.0.0/0"]
+tls_allow_cidrs = ["0.0.0.0/0"]

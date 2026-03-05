@@ -1,0 +1,1 @@
+("~/" "~/bios512/" "~/bios611/" "~/bios611/makefiles_build_systems/project/" "~/bios512/lecture7/alice/" "~/bios512/lecture7/bob/" "~/bios611/git-in-depth/rebase-copy/" "~/bios611/git-in-depth/rebase-example/" "/book/" "/book/bios611/my-project/" "~/my-project/" "/book/bios611/" "/book/bios512/")

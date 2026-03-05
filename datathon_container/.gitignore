@@ -1,0 +1,24 @@
+# Local/editor state
+.bash_history
+.ipynb_checkpoints/
+.ipython/
+.jupyter/
+.jupyter_ystore.db
+.local/
+.ssh/
+.emacs.d/
+.gitconfig
+
+# Notebooks and scratch
+*.ipynb
+Containerfile~
+
+# Data/artifacts
+container-image.tar.sha256
+container_mounts.txt
+datasets/
+datasets.pdf
+
+# Empty placeholders
+envfile.txt
+test

@@ -1,25 +1,20 @@
-This is a terraform setup I built with the assistance of codex which
-deploys a configurable number of EC2 instances which run a podman
-container pulled from s3.
+This is a Terraform setup that deploys a configurable number of EC2
+instances that run a prebuilt podman image pulled from S3.
 
-Each instance runs the container twice: jupyter lab and opencode's web
-interface.
+Each instance runs the same image twice: Jupyter Lab (port 8888) and
+Opencode's web interface (port 3000).
 
-So this basically works. Missing pieces:
+Datasets are uploaded as a tar.gz to S3, pulled down on boot, and mounted
+read-only into both containers at `/data`.
 
-Upload the zip of the datasets to s3, pull the datasets down to the
-containers and put them someplace. How should we handle files?
-Presently we don't mount any volumes in the container.
+Teams are color coded via `team-colors.txt`. `deploy.sh` defaults the
+instance count to the number of colors in that file, but you can override
+it with `INSTANCE_COUNT` or `--team-count`.
 
-Nice to have: I have bought caiph_datahon.live and it would be nice to
-point sub-domains to the instances, eg:
-
-opencode_red.caiph_datathon.live 
-jupyter_red.caiph_datathon.live 
-
-etc
-
-Teams are color coded.
+Subdomains are mapped from `team-colors.txt` in order. For example, the
+first color maps to `blue.caiphdatathon.live`, the second to
+`orange.caiphdatathon.live`, etc. See `namecheap_sync_dns.py` for the
+exact mapping table and overrides.
 
 
 
@@ -29,10 +24,9 @@ AI Slop:
 
 # AWS Infrastructure-as-Code: EC2 + Podman + Caddy with HTTPS (Namecheap DNS)
 
-This Terraform module deploys a fleet of Ubuntu EC2 instances, builds and
-runs a containerised application from a zipped build context stored in S3, and
-exposes two separate services under per-instance sub‑domains using
-[Caddy](https://caddyserver.com/) for automatic TLS via Let’s Encrypt.
+This Terraform module deploys a fleet of Ubuntu EC2 instances, pulls and
+runs a prebuilt container image tarball from S3, and exposes two separate
+services per instance. Caddy is always enabled for HTTPS termination.
 
 DNS is assumed to be managed externally (e.g., Namecheap). After applying
 Terraform, create A records at your DNS provider for
@@ -43,6 +37,8 @@ Each instance is assigned a public IP (configurable) and is reachable
 only from your detected public IPv4 (/32) on the configured ports by default
 (suitable for testing via direct IP access). You can override this behavior by
 providing an explicit `allow_cidrs` list.
+TLS ports can be managed separately with `tls_allow_cidrs` so you can keep
+app ports restricted while allowing public HTTPS/ACME validation on 80/443.
 Route 53 is not used in this configuration. If you prefer Route 53-managed
 DNS and automatic record creation, that can be added, but this module is
 set up to work with external DNS (e.g., Namecheap) out of the box.
@@ -53,19 +49,24 @@ set up to work with external DNS (e.g., Namecheap) out of the box.
 > default, which requires inbound connectivity on ports 80 and 443 from the
 > Let’s Encrypt validation network. Because inbound access is restricted to
 > your detected public IP for testing, issuance will fail until you temporarily
-> broaden 80/443 (e.g., allow `0.0.0.0/0`) or switch Caddy to DNS‑01. For
+> broaden 80/443 (e.g., allow `0.0.0.0/0`) or switch Caddy to DNS‑01.
+> Use `tls_allow_cidrs = ["0.0.0.0/0"]` to keep only TLS ports public. For
 > initial IP testing, use `http://<instance_ip>:8888` and `http://<instance_ip>:3000`.
 
 ## Prerequisites
 
 * **Terraform ≥ 1.5** installed locally.
 * **AWS CLI v2** installed and configured for the target account/region.
-* A zipped container build context in S3, created with the included
-  `upload_container_stuff.sh` script. The script uploads to a bucket
-  named `podman-build-context-<account-id>-<region>` (creating it if
-  needed) with key `build-context.zip`.
+* A prebuilt container image archive (`container-image.tgz` locally),
+  created with `./datathon_container/build_and_export.sh` and uploaded
+  with `./upload_image.sh` to the bucket
+  `podman-build-context-<account-id>-<region>` as `container-image.tar.gz`.
 * `env.txt` in the same bucket (key `env.txt`) – environment file passed
-  to containers at runtime.
+  to containers at runtime (uploaded by `upload_image.sh`).
+* A datasets archive (`data_sets.tgz` locally) uploaded with
+  `upload_datasets.sh` to the same bucket under key `data_sets.tar.gz`.
+* Optional persistent workspace volumes (EBS) can be created and are mounted
+  into both containers at `/workspace` for user code and notebooks.
 * No separate allowlist file is needed. Terraform auto-detects your public
   IPv4 and restricts inbound access to that /32 on the configured ports.
 * A **registered domain** (e.g. `caiphdatathon.live`). DNS is managed at
@@ -85,36 +86,25 @@ set up to work with external DNS (e.g., Namecheap) out of the box.
 
 ## Quick start
 
-1. **Copy the module** somewhere convenient and change into that directory:
+1. **Build and upload the image and datasets**:
 
    ```bash
-   mkdir -p ~/terraform/projects/mycluster
-   cp -r aws_iac/* ~/terraform/projects/mycluster
-   cd ~/terraform/projects/mycluster
+   ./datathon_container/build_and_export.sh
+   ./upload_image.sh ./container-image.tgz
+   ./upload_datasets.sh ./data_sets.tgz
    ```
 
-2. **Create a `terraform.tfvars` file** describing your deployment. At a
-   minimum set the instance count, instance type, and the domain name. Ports
-   and run commands default to `80,443,8888,3000` and Jupyter/Opencode. For
-   example:
-
-   ```hcl
-   # Instances
-   instance_count = 1
-   instance_type  = "t3.medium"
-
-   # Domain used by Caddy for HTTPS (default provided)
-   domain_name = "caiphdatathon.live"
-   ```
-
-   DNS is managed at your registrar (e.g., Namecheap). No Route 53 resources
-   are created by this module.
-
-3. **Initialise and apply** the Terraform configuration:
+2. **Run the one‑click deploy** (defaults instance count to the number of
+   lines in `team-colors.txt`):
 
    ```bash
-   terraform init
-   terraform apply -auto-approve
+   ./deploy.sh
+   ```
+
+   To override count for a single run:
+
+   ```bash
+   ./deploy.sh --team-count 3
    ```
 
    Terraform will display the public and private IPs of your instances and
@@ -131,16 +121,31 @@ set up to work with external DNS (e.g., Namecheap) out of the box.
 
    Use the `dns_records` output as a reference.
 
-5. **Access your services over HTTPS.** Once DNS propagates and Let’s Encrypt
-   issues certificates (Caddy handles this automatically), you should be able
-   to browse to:
+5. **Access your services over direct IP ports** (default path):
 
    ```
-   https://team01.caiphdatathon.live/jupyter
-   https://team01.caiphdatathon.live/opencode
+   http://<instance_ip>:8888
+   http://<instance_ip>:3000
    ```
 
-   Replace `team01` with `team02`, `team03`, etc. for additional nodes.
+   Caddy is installed by default and serves HTTPS on each team subdomain
+   (`blue.<domain>`, `orange.<domain>`, etc.), routing `/jupyter` to Jupyter
+   and all other paths to Opencode. Ensure DNS and ports 80/443 are open.
+
+6. **(Optional) Sync Namecheap DNS automatically** for team subdomains:
+
+   ```bash
+   export NAMECHEAP_API_USER=your_api_user
+   export NAMECHEAP_API_KEY=your_api_key
+   export NAMECHEAP_USERNAME=your_username
+   # optional: NAMECHEAP_CLIENT_IP (auto-detected if not set)
+   export DOMAIN=caiphdatathon.live
+   ./namecheap_sync_dns.py
+   ```
+
+   This reads `team-colors.txt` and `terraform output instance_public_ips`,
+   then updates A records for the team subdomains. Set `DRY_RUN=true` to
+   preview changes, or `TEAM_NAMES=blue,orange,...` to override names.
 
 ## Customisation
 
@@ -149,23 +154,22 @@ set up to work with external DNS (e.g., Namecheap) out of the box.
   need a load balancer, VPN or AWS Systems Manager Session Manager to
   reach them.
 
-* **Build context source (hard-coded):** This module always downloads a
-  zipped build context from S3 at bucket `podman-build-context-<account-id>-<region>`
-  and key `build-context.zip`. Use `upload_container_stuff.sh` from your
-  datathon_container directory to prepare and upload this zip.
+* **Image source (hard-coded):** This module always downloads a prebuilt
+  image tarball from S3 at bucket `podman-build-context-<account-id>-<region>`
+  and key `container-image.tar.gz`. Use `datathon_container/build_and_export.sh`
+  and `upload_image.sh` to produce and upload it.
 
 * **Additional S3 read permissions:** The IAM policy grants read access only
-  to the zipped build context (`build-context.zip`) and your `env.txt` in the
-  same bucket. If your container needs to fetch more data at build or runtime,
-  expand the policy accordingly (e.g. grant access to a prefix).
+  to the runtime artifacts in the build-context bucket (image tarball,
+  env.txt, datasets archive). If your container needs to fetch more data at
+  build or runtime, expand the policy accordingly (e.g. grant access to a prefix).
 
-* **Zipped build context only:** Using a single `Containerfile` path is not
-  supported here; the system always uses the zipped build context convention
-  described above.
+* **No build-context zip:** The instance does not build from `build-context.zip`.
+  The bootstrap path loads a prebuilt image tar instead.
 
 * **Custom Caddy configuration:** Edit `user_data.sh.tftpl` if you
   need different routing logic, TLS settings, or DNS challenge
-  providers.  See the Caddy documentation for details.
+  providers.
 
 * **Jupyter tokens:** Each instance gets a unique random token. Terraform
   outputs them as a sensitive list (`jupyter_tokens`), they are included in

@@ -23,3 +23,33 @@ container-image.tgz.sha256
 *.zip
 *.tgz
 *.csv
+
+*.elc
+*.el
+!init.el
+elpa/
+melpa/
+backups/
+.ipynb_checkpoints/
+
+# Emacs
+*~
+\#*\#
+.\#*
+.emacs.desktop
+.emacs.desktop.lock
+.elc
+auto-save-list/
+tramp
+.eshell/
+
+# Org / Emacs lock files
+*.org-id-locations
+
+# Jupyter
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+__pycache__/
+
+.terraform/

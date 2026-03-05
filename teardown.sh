@@ -131,6 +131,7 @@ if [[ "$PURGE_S3" == "true" ]]; then
   aws s3 rm "s3://$BUCKET/build-context.zip" >/dev/null 2>&1 || true
   aws s3 rm "s3://$BUCKET/container-image.tar.gz" >/dev/null 2>&1 || true
   aws s3 rm "s3://$BUCKET/env.txt" >/dev/null 2>&1 || true
+  aws s3 rm "s3://$BUCKET/data_sets.tar.gz" >/dev/null 2>&1 || true
 fi
 
 cat <<EOF

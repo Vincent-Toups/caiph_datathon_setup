@@ -26,6 +26,18 @@ variable "root_volume_size_gb" {
   default     = 64
 }
 
+variable "create_data_volumes" {
+  description = "Whether to create per-instance persistent data volumes (EBS) for user workspaces."
+  type        = bool
+  default     = true
+}
+
+variable "data_volume_size_gb" {
+  description = "Size in GiB for each persistent data volume when created."
+  type        = number
+  default     = 100
+}
+
 variable "ssh_key_name" {
   description = "Optional EC2 key pair name for SSH access.  Leave null to skip key attachment."
   type        = string
@@ -44,11 +56,6 @@ variable "ports" {
   default     = [22, 8888, 3000]
 }
 
-variable "enable_caddy" {
-  description = "Whether to install and run Caddy reverse proxy on each instance."
-  type        = bool
-  default     = false
-}
 
 variable "auto_allow_caller_ip" {
   description = "If true, automatically allow only the caller's public IPv4 (/32). If false, you must provide allow_cidrs."
@@ -58,6 +65,12 @@ variable "auto_allow_caller_ip" {
 
 variable "allow_cidrs" {
   description = "Optional explicit list of CIDR ranges allowed inbound on the configured ports. When non-empty, overrides auto_allow_caller_ip."
+  type        = list(string)
+  default     = []
+}
+
+variable "tls_allow_cidrs" {
+  description = "Optional explicit CIDRs allowed for TLS/ACME ports (80 and 443). Defaults to allow_cidrs behavior when empty."
   type        = list(string)
   default     = []
 }
@@ -100,4 +113,10 @@ variable "domain_name" {
   description = "Base domain to use for HTTPS (e.g., caiphdatathon.live).  Each instance will serve at team01.<domain_name>, team02.<domain_name>, etc."
   type        = string
   default     = "caiphdatathon.live"
+}
+
+variable "env_hash" {
+  description = "Hash of env.txt to force instance refresh when env changes."
+  type        = string
+  default     = ""
 }

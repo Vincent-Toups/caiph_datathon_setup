@@ -21,6 +21,8 @@ log "[START] Datathon node bootstrap starting"
 
 export DEBIAN_FRONTEND=noninteractive
 export AWS_REGION="${aws_region}"
+# env.txt hash (forces instance refresh when env changes)
+ENV_HASH="${env_hash}"
 
 ##############################
 # Base packages and podman
@@ -65,6 +67,16 @@ cd "$workdir"
 # Bucket convention from Terraform locals
 BUILDCTX_BUCKET="${buildctx_bucket}"
 IMAGE_TAR_KEY="${image_tar_key}"
+DATASETS_KEY="${datasets_key}"
+CODE_KEY="${code_key}"
+CODE_BACKUP_PREFIX="${code_backup_prefix}"
+DATASETS_HOST_DIR="/opt/datasets"
+DATASETS_CONTAINER_DIR="/data"
+DATA_VOLUME_DEVICE="${data_volume_device}"
+WORKSPACE_HOST_DIR="${workspace_host_dir}"
+WORKSPACE_CONTAINER_DIR="${workspace_container}"
+CODE_CONTAINER_DIR="/code"
+DEFAULT_WORKDIR="$CODE_CONTAINER_DIR"
 
 # Derive bucket if empty (defensive)
 if [[ -z "$BUILDCTX_BUCKET" ]]; then
@@ -106,6 +118,168 @@ if [[ "$LOAD_IMAGE_PATH" != "$LOCAL_IMAGE_PATH" ]]; then
 fi
 
 ##############################
+# Datasets
+##############################
+DATASETS_MOUNT=()
+log "Fetching datasets: s3://$${BUILDCTX_BUCKET}/$${DATASETS_KEY}"
+DATASETS_ARCHIVE="$workdir/$${DATASETS_KEY##*/}"
+aws s3 cp "s3://$${BUILDCTX_BUCKET}/$${DATASETS_KEY}" "$DATASETS_ARCHIVE"
+
+log "Extracting datasets to $DATASETS_HOST_DIR"
+mkdir -p "$DATASETS_HOST_DIR"
+# Extract and strip a single top-level directory (expected layout).
+tar -xzf "$DATASETS_ARCHIVE" -C "$DATASETS_HOST_DIR" --strip-components=1
+chmod -R a=rX "$DATASETS_HOST_DIR" || true
+rm -f "$DATASETS_ARCHIVE"
+
+if [[ -d "$DATASETS_HOST_DIR" ]]; then
+  DATASETS_MOUNT=( -v "$DATASETS_HOST_DIR:$DATASETS_CONTAINER_DIR:ro" )
+  log "Datasets mounted read-only at $DATASETS_CONTAINER_DIR"
+fi
+
+##############################
+# Persistent workspace volume
+##############################
+WORKSPACE_MOUNT=()
+CODE_MOUNT=()
+CODE_HOST_DIR=""
+if [[ -n "$DATA_VOLUME_DEVICE" ]]; then
+  log "Configuring workspace volume on $DATA_VOLUME_DEVICE"
+  DEV="$DATA_VOLUME_DEVICE"
+  ALT_DEV="$${DATA_VOLUME_DEVICE/sd/xvd}"
+  ROOT_SRC=$(findmnt -n -o SOURCE / || true)
+  ROOT_DISK=""
+  if [[ -n "$ROOT_SRC" ]]; then
+    ROOT_DISK_NAME=$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null | head -n1 || true)
+    if [[ -n "$ROOT_DISK_NAME" ]]; then
+      ROOT_DISK="/dev/$ROOT_DISK_NAME"
+    fi
+  fi
+
+  for _ in {1..30}; do
+    if [[ -b "$DEV" ]]; then
+      break
+    fi
+    if [[ -b "$ALT_DEV" ]]; then
+      DEV="$ALT_DEV"
+      break
+    fi
+    if [[ -z "$ROOT_DISK" ]]; then
+      sleep 1
+      continue
+    fi
+    CANDIDATE=$(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | grep -v "$ROOT_DISK" | head -n1 || true)
+    if [[ -n "$CANDIDATE" && -b "$CANDIDATE" ]]; then
+      DEV="$CANDIDATE"
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ -b "$DEV" ]]; then
+    if ! blkid "$DEV" >/dev/null 2>&1; then
+      log "Formatting workspace volume"
+      mkfs.ext4 -F "$DEV"
+    fi
+    mkdir -p "$WORKSPACE_HOST_DIR"
+    UUID=$(blkid -s UUID -o value "$DEV")
+    if ! grep -q "$UUID" /etc/fstab; then
+      echo "UUID=$UUID $WORKSPACE_HOST_DIR ext4 defaults,nofail 0 2" >> /etc/fstab
+    fi
+    mount -a
+    chown -R root:root "$WORKSPACE_HOST_DIR" || true
+    chmod -R a+rwx "$WORKSPACE_HOST_DIR" || true
+    WORKSPACE_MOUNT=( -v "$WORKSPACE_HOST_DIR:$WORKSPACE_CONTAINER_DIR:rw" )
+    CODE_HOST_DIR="$WORKSPACE_HOST_DIR/code"
+    log "Workspace mounted at $WORKSPACE_CONTAINER_DIR"
+  else
+    log "[WARN] Workspace volume not found; continuing without persistent mount"
+  fi
+fi
+
+# Code archive (read/write on workspace volume if present)
+if [[ -z "$CODE_HOST_DIR" ]]; then
+  CODE_HOST_DIR="/opt/code"
+fi
+mkdir -p "$CODE_HOST_DIR"
+log "Fetching code archive: s3://$${BUILDCTX_BUCKET}/$${CODE_KEY}"
+CODE_ARCHIVE="$workdir/$${CODE_KEY##*/}"
+aws s3 cp "s3://$${BUILDCTX_BUCKET}/$${CODE_KEY}" "$CODE_ARCHIVE"
+log "Extracting code to $CODE_HOST_DIR"
+tar -xzf "$CODE_ARCHIVE" -C "$CODE_HOST_DIR"
+chmod -R a+rwX "$CODE_HOST_DIR" || true
+rm -f "$CODE_ARCHIVE"
+CODE_MOUNT=( -v "$CODE_HOST_DIR:$CODE_CONTAINER_DIR:rw" )
+log "Code mounted read-write at $CODE_CONTAINER_DIR"
+
+##############################
+# Periodic code backups to S3
+##############################
+
+log "Configuring code backup timer (every 5 minutes)"
+cat > /usr/local/bin/code_backup.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CODE_DIR="$${CODE_HOST_DIR:-/opt/code}"
+BUCKET="$${BUILDCTX_BUCKET:-}"
+PREFIX="$${CODE_BACKUP_PREFIX:-code-backups}"
+TEAM="$${TEAM_NAME:-team}"
+TS=$(date -u +%Y%m%d-%H%M%S)
+HOST=$(hostname)
+
+if [[ -z "$BUCKET" || ! -d "$CODE_DIR" ]]; then
+  exit 0
+fi
+
+TMP="/tmp/code-$${TS}.tgz"
+find "$CODE_DIR" -type f \\( -name '*.py' -o -name '*.R' -o -name '*.r' -o -name '*.ipynb' -o -name '*.txt' -o -name '*.md' -o -name '*.csv' \\) -print0 \\
+  | tar --null -czf "$TMP" --files-from -
+
+KEY="$${PREFIX}/$${TEAM}/code-$${HOST}-$${TS}.tgz"
+aws s3 cp "$TMP" "s3://$${BUCKET}/$${KEY}"
+rm -f "$TMP"
+EOF
+chmod +x /usr/local/bin/code_backup.sh
+
+cat > /etc/systemd/system/code-backup.service <<'EOF'
+[Unit]
+Description=Backup code directory to S3
+
+[Service]
+Type=oneshot
+Environment=CODE_HOST_DIR=%CODE_HOST_DIR%
+Environment=BUILDCTX_BUCKET=%BUILDCTX_BUCKET%
+Environment=CODE_BACKUP_PREFIX=%CODE_BACKUP_PREFIX%
+Environment=TEAM_NAME=%TEAM_NAME%
+ExecStart=/usr/local/bin/code_backup.sh
+EOF
+
+cat > /etc/systemd/system/code-backup.timer <<'EOF'
+[Unit]
+Description=Run code backup every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Unit=code-backup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Fill in environment values for the service
+sed -i "s|%CODE_HOST_DIR%|$CODE_HOST_DIR|g" /etc/systemd/system/code-backup.service
+sed -i "s|%BUILDCTX_BUCKET%|$${BUILDCTX_BUCKET}|g" /etc/systemd/system/code-backup.service
+sed -i "s|%CODE_BACKUP_PREFIX%|$${CODE_BACKUP_PREFIX}|g" /etc/systemd/system/code-backup.service
+sed -i "s|%TEAM_NAME%|${team_name}|g" /etc/systemd/system/code-backup.service
+
+systemctl daemon-reload
+systemctl enable --now code-backup.timer
+log "Code backup timer enabled"
+
+##############################
 # Run application containers
 ##############################
 
@@ -124,6 +298,12 @@ if echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])jupyter( |$)"; then
   if ! echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])--allow-root([[:space:]]|$)"; then
     RUN1_CMD="$RUN1_CMD --allow-root"
   fi
+  if ! echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])--ServerApp.base_url(=|[[:space:]])"; then
+    RUN1_CMD="$RUN1_CMD --ServerApp.base_url=/jupyter"
+  fi
+  if ! echo "$RUN1_CMD" | grep -Eq "(^|[[:space:]])--ServerApp.root_dir(=|[[:space:]])"; then
+    RUN1_CMD="$RUN1_CMD --ServerApp.root_dir=$${DEFAULT_WORKDIR}"
+  fi
 fi
 
 # Remove any existing containers with the same names
@@ -136,16 +316,26 @@ podman rm -f "${run2_name}" >/dev/null 2>&1 || true
 # expected.
 log "Starting container: ${run1_name}"
 podman run -d --name "${run1_name}" \
+  --user 0 \
+  --workdir "$DEFAULT_WORKDIR" \
   --env-file "$workdir/env.txt" \
   --restart=always \
+  "$${DATASETS_MOUNT[@]}" \
+  "$${WORKSPACE_MOUNT[@]}" \
+  "$${CODE_MOUNT[@]}" \
   -p 8888:8888 \
   "${image_name}" bash -lc "$RUN1_CMD"
 
 # Run the second container
 log "Starting container: ${run2_name}"
 podman run -d --name "${run2_name}" \
+  --user 0 \
+  --workdir "$DEFAULT_WORKDIR" \
   --env-file "$workdir/env.txt" \
   --restart=always \
+  "$${DATASETS_MOUNT[@]}" \
+  "$${WORKSPACE_MOUNT[@]}" \
+  "$${CODE_MOUNT[@]}" \
   -p 3000:3000 \
   "${image_name}" bash -lc '${run2_cmd}'
 
@@ -160,47 +350,56 @@ systemctl daemon-reload
 systemctl enable --now "${run1_name}.service" "${run2_name}.service"
 log "Enabled services: ${run1_name}.service, ${run2_name}.service"
 
-if [[ "${enable_caddy}" == "true" ]]; then
-  ##############################
-  # Caddy reverse proxy setup
-  ##############################
+##############################
+# Caddy reverse proxy setup
+##############################
 
-  # Install Caddy from its official repository.  Caddy automatically
-  # obtains TLS certificates via Let’s Encrypt.  If your security
-  # group restricts ports 80 and 443 to a limited set of IPs, ensure
-  # that Let’s Encrypt can reach your service or configure Caddy to
-  # use DNS-01 challenges with a supported provider.
-  log "Installing Caddy"
-  cd /
-  mkdir -p /tmp/caddy-install
-  cd /tmp/caddy-install
-  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list
-  apt-get update -y
-  apt-get install -y caddy
+# Install Caddy from its official repository.  Caddy automatically
+# obtains TLS certificates via Let’s Encrypt.  If your security
+# group restricts ports 80 and 443 to a limited set of IPs, ensure
+# that Let’s Encrypt can reach your service or configure Caddy to
+# use DNS-01 challenges with a supported provider.
+log "Installing Caddy"
+cd /
+mkdir -p /tmp/caddy-install
+cd /tmp/caddy-install
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list
+apt-get update -y
+apt-get install -y caddy
 
-  # Derive the subdomain for this instance.  Instances are numbered
-  # starting from zero by Terraform, so add 1 and left-pad with zeros.
-  team_index=$(printf "%02d" $(( ${instance_index} + 1 )))
-  team_name="team$${team_index}"
-  fqdn="$${team_name}.${domain_name}"
+# Derive the subdomain for this instance from the team name.
+team_name="${team_name}"
+fqdn="$${team_name}.${domain_name}"
 
-  # Caddy is optional; direct port access is also supported.
-  # Keep this disabled if upstream services cannot run behind a path prefix.
-  log "Writing Caddyfile for $${fqdn}"
-  cat > /etc/caddy/Caddyfile <<EOF
+log "Writing Caddyfile for $${fqdn}"
+cat > /etc/caddy/Caddyfile <<EOF
 $${fqdn} {
-  reverse_proxy /jupyter* 127.0.0.1:8888
-  reverse_proxy /opencode* 127.0.0.1:3000
+  handle /jupyter* {
+    reverse_proxy 127.0.0.1:8888
+  }
+  handle {
+    reverse_proxy 127.0.0.1:3000
+  }
+}
+
+# Fallback for direct IP / unknown host access (HTTP only).
+# Useful when DNS is not yet working.
+:80 {
+  handle /jupyter* {
+    reverse_proxy 127.0.0.1:8888
+  }
+  handle {
+    reverse_proxy 127.0.0.1:3000
+  }
 }
 EOF
 
-  # Enable and start Caddy.  It will automatically request
-  # certificates from Let’s Encrypt and renew them as needed.
-  systemctl enable --now caddy
-  log "Caddy enabled and started"
-else
-  log "Skipping Caddy setup (enable_caddy=false); use direct host ports instead."
-fi
+# Ensure Caddy is enabled and restarted after writing Caddyfile.
+# apt may auto-start caddy during package install with a default HTTP-only
+# config; restart here guarantees the generated site config is loaded.
+systemctl enable caddy
+systemctl restart caddy
+log "Caddy enabled and restarted with generated config"
 
 log "[OK] Datathon node bootstrap complete"

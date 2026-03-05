@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Uploads the prebuilt container image tarball to S3 using the repo convention.
+# Uploads a datasets archive to S3 using the repo convention.
 # Bucket: podman-build-context-<account>-<region>
-# Key:    container-image.tar.gz (kept for Terraform compatibility)
-# Also uploads env.txt as env.txt in same bucket.
+# Key:    data_sets.tar.gz
 #
 # Usage:
-#   ./upload_image.sh [--force] [path_to_image_tgz]
-#   default path: ./container-image.tgz
+#   ./upload_datasets.sh [--force] [path_to_datasets_tgz]
+#   default path: ./data_sets.tgz
 
 FORCE_UPLOAD=false
-TAR="container-image.tgz"
+TAR="data_sets.tgz"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,7 +18,7 @@ while [[ $# -gt 0 ]]; do
       FORCE_UPLOAD=true
       ;;
     --help|-h)
-      echo "Usage: $0 [--force] [path_to_image_tgz]"
+      echo "Usage: $0 [--force] [path_to_datasets_tgz]"
       exit 0
       ;;
     *)
@@ -28,9 +27,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
-KEY_IMAGE=container-image.tar.gz
-KEY_IMAGE_SHA256=container-image.tar.gz.sha256
-KEY_ENV=env.txt
+KEY_DATASETS=data_sets.tar.gz
+KEY_DATASETS_SHA256="${KEY_DATASETS}.sha256"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] '$1' not found" >&2; exit 1; }; }
 need aws
@@ -48,8 +46,7 @@ sha256_of() {
 }
 
 if [[ ! -f "$TAR" ]]; then
-  echo "[ERROR] Image archive not found: $TAR" >&2
-  echo "        Build it with: ./datathon_container/build_and_export.sh" >&2
+  echo "[ERROR] Datasets archive not found: $TAR" >&2
   exit 1
 fi
 
@@ -78,28 +75,21 @@ if ! bucket_exists "$BUCKET"; then
 fi
 
 REMOTE_HASH=""
-if aws s3 cp "s3://$BUCKET/$KEY_IMAGE_SHA256" "$TMP_REMOTE_HASH" >/dev/null 2>&1; then
+if aws s3 cp "s3://$BUCKET/$KEY_DATASETS_SHA256" "$TMP_REMOTE_HASH" >/dev/null 2>&1; then
   REMOTE_HASH=$(awk '{print $1}' "$TMP_REMOTE_HASH" | tr -d '\r\n')
 fi
 
 if [[ "$FORCE_UPLOAD" != "true" && -n "$REMOTE_HASH" && "$REMOTE_HASH" == "$LOCAL_HASH" ]]; then
-  echo "[INFO] Image unchanged (sha256 matches); skipping upload for s3://$BUCKET/$KEY_IMAGE"
+  echo "[INFO] Datasets unchanged (sha256 matches); skipping upload for s3://$BUCKET/$KEY_DATASETS"
 else
   if [[ "$FORCE_UPLOAD" == "true" ]]; then
-    echo "[INFO] Force upload enabled; uploading image even if unchanged"
+    echo "[INFO] Force upload enabled; uploading datasets even if unchanged"
   fi
-  echo "[INFO] Uploading image to s3://$BUCKET/$KEY_IMAGE"
-  aws s3 cp "$TAR" "s3://$BUCKET/$KEY_IMAGE"
+  echo "[INFO] Uploading datasets to s3://$BUCKET/$KEY_DATASETS"
+  aws s3 cp "$TAR" "s3://$BUCKET/$KEY_DATASETS"
   printf '%s\n' "$LOCAL_HASH" > "$TMP_LOCAL_HASH"
-  echo "[INFO] Updating checksum marker: s3://$BUCKET/$KEY_IMAGE_SHA256"
-  aws s3 cp "$TMP_LOCAL_HASH" "s3://$BUCKET/$KEY_IMAGE_SHA256"
+  echo "[INFO] Updating checksum marker: s3://$BUCKET/$KEY_DATASETS_SHA256"
+  aws s3 cp "$TMP_LOCAL_HASH" "s3://$BUCKET/$KEY_DATASETS_SHA256"
 fi
 
-if [[ -f env.txt ]]; then
-  echo "[INFO] Uploading env.txt to s3://$BUCKET/$KEY_ENV"
-  aws s3 cp env.txt "s3://$BUCKET/$KEY_ENV"
-else
-  echo "[WARN] env.txt not found in repo root; skipping upload"
-fi
-
-echo "[OK] Upload complete"
+echo "[OK] Datasets upload complete"
